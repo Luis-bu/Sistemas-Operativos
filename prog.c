@@ -1,19 +1,14 @@
-#include <stdio.h>
-#include <stdlib.h>  // Para atoi()
+#include<stdio.h>
 
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        printf("Uso: %s <nombre> <numero>\n", argv[0]);
-        return 1;
-    }
+main (int argc, char **argv) {
 
-    char *nombre = argv[1];
-    int repeticiones = atoi(argv[2]); 
 
-    for (int i = 0; i < repeticiones; i++) {
-        printf("%s\n", nombre);
-    }
+int i;
 
-    return 0;
+  printf(“argc = %d\n”,argc);
+
+  for (i=0;i<argc;++i)
+
+    printf(“argv[%d]:%s\n'',i,argv[i]);
+
 }
-
