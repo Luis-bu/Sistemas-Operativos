@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <stdlib.h>  // Para atoi()
+#include <stdlib.h>
 
 int main(int argc, char *argv[]) {
     if (argc != 3) { // Validar que se pasen 2 argumentos

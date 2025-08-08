@@ -1,15 +1,23 @@
 #include <stdio.h>
+#include <stdlib.h>
 
-int main ()
+int main(int argc, char *argv[])
 {
-   FILE *fp;
-   printf("Programa que intenta abrir el archivo file.txt\n");
-   /* Intentando abrir el archivo */
-   fp = fopen("file.txt", "r");
-   if( fp == NULL ) {
-      return(-1);
-   }
-   fclose(fp);
-      
-   return(0);
+    FILE *fp;
+
+    if (argc != 2) { // Validar argumento
+        printf("Uso: %s <nombre_archivo>\n", argv[0]);
+        return 1;
+    }
+
+    printf("Intentando abrir el archivo: %s\n", argv[1]);
+    fp = fopen(argv[1], "r");
+
+    if (fp == NULL) {
+        perror("No se pudo abrir el archivo"); 
+        exit(1);
+    }
+
+    fclose(fp);
+    return 0;
 }
