@@ -2,6 +2,8 @@
 // Simulador de reservas - Servidor (Controlador de Reserva)
 // Compilar: make controlador
 // Ejecutar:  ./controlador -i <horaIni> -f <horaFin> -s <segHoras> -t <aforoMax> -p <pipeRecibe>
+//
+// Ejemplo:   ./controlador -i 7 -f 12 -s 10 -t 10 -p pipe1
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -475,9 +477,12 @@ int main(int argc, char *argv[]) {
     g_running = false;
     pthread_mutex_unlock(&g_mtx);
 
-    // Destrabar lector si está bloqueado
+    // Despertar al hilo lector (escribe un '\n' para destrabar read())
     int fd_unblock = open(g_cfg.pipeRecibe, O_WRONLY | O_NONBLOCK);
-    if (fd_unblock != -1) close(fd_unblock);
+    if (fd_unblock != -1) {
+        (void)write(fd_unblock, "\n", 1);  // <- clave para que el lector salga
+        close(fd_unblock);
+    }
 
     // Esperar a que el lector termine (ya no se procesan más REQs)
     pthread_join(thr_reader, NULL);

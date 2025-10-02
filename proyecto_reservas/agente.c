@@ -119,7 +119,7 @@ int main(int argc, char *argv[]) {
     }
     printf("[AGENTE %s] Hora actual recibida: %d\n", nombre, horaActual);
 
-    // Reabrir en NO BLOQUEANTE para evitar deadlock (clave del fix)
+    // Reabrir en NO BLOQUEANTE para evitar deadlock durante el flujo normal
     close(fd_r);
     fd_r = open(reply_pipe, O_RDONLY | O_NONBLOCK);
     if (fd_r == -1) die("No pude reabrir reply_pipe '%s': %s", reply_pipe, strerror(errno));
@@ -182,35 +182,34 @@ int main(int argc, char *argv[]) {
         sleep(2); // enunciado: 2s entre solicitudes
     }
 
-    // Espera breve por si llega END, luego salir
-    printf("[AGENTE %s] No hay más solicitudes. Esperando posible END...\n", nombre);
-    for (int tries = 0; tries < 50; ++tries) {
-        char rbuf[256];
-        ssize_t n = read(fd_r, rbuf, sizeof(rbuf)-1);
-        if (n > 0) {
-            rbuf[n] = 0;
-            char *ln = strtok(rbuf, "\n");
-            while (ln) {
-                if (strncmp(ln, "END", 3) == 0) {
-                    printf("[AGENTE %s] Recibido END. Terminando.\n", nombre);
-                    close(fd_r); close(fd_w);
-                    printf("Agente %s termina.\n", nombre);
-                    return 0;
-                }
-                if (strncmp(ln, "RESP:", 5) == 0) {
-                    printf("[AGENTE %s] Respuesta: %s\n", nombre, ln + 5);
-                }
-                if (strncmp(ln, "TIME:", 5) == 0) {
-                    int h = atoi(ln+5);
-                    printf("[AGENTE %s] (update) Hora actual ahora: %d\n", nombre, h);
-                }
-                ln = strtok(NULL, "\n");
-            }
-        }
-        usleep(100 * 1000);
-    }
+    // Esperar END de forma bloqueante (sin timeout)
+    printf("[AGENTE %s] No hay más solicitudes. Esperando END del servidor...\n", nombre);
 
-    close(fd_r); close(fd_w);
-    printf("Agente %s termina.\n", nombre);
-    return 0;
+    int flags = fcntl(fd_r, F_GETFL, 0);
+    if (flags != -1) fcntl(fd_r, F_SETFL, flags & ~O_NONBLOCK);
+
+    while (1) {
+        char rbuf[512];
+        ssize_t n = read(fd_r, rbuf, sizeof(rbuf)-1);
+        if (n <= 0) continue;  // bloquear hasta que llegue algo
+        rbuf[n] = 0;
+
+        char *ln = strtok(rbuf, "\n");
+        while (ln) {
+            if (strncmp(ln, "END", 3) == 0) {
+                printf("[AGENTE %s] Recibido END. Terminando.\n", nombre);
+                close(fd_r); close(fd_w);
+                printf("Agente %s termina.\n", nombre);
+                return 0;
+            }
+            if (strncmp(ln, "RESP:", 5) == 0) {
+                printf("[AGENTE %s] Respuesta: %s\n", nombre, ln + 5);
+            }
+            if (strncmp(ln, "TIME:", 5) == 0) {
+                int h = atoi(ln + 5);
+                printf("[AGENTE %s] (update) Hora actual ahora: %d\n", nombre, h);
+            }
+            ln = strtok(NULL, "\n");
+        }
+    }
 }
