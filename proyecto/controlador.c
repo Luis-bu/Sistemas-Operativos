@@ -1,304 +1,423 @@
-/* controlador.c */
-#include "common.h"
-#include "utils.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <math.h>
 
-hour_slot_t park[HOURS_DAY];
-int current_hour = 0;          /* índice 0 = 7h */
-int aforo_max = 0;
-volatile sig_atomic_t finish = 0;
-char pipe_server[MAX_PIPE_NAME];
-int seg_per_hour = 0;
+#define LIMITE_CLIENTES 10
+#define TAM_BUFFER 256
 
-/* estadísticas */
-int stats_accepted = 0;
-int stats_reprogram = 0;
-int stats_denied = 0;
+pthread_mutex_t bloqueo;
 
-/* tabla de pipes de respuesta */
 typedef struct {
-    int  pid;
-    char pipe_name[MAX_PIPE_NAME];
-} client_t;
-client_t clients[MAX_AGENTS];
-int nclients = 0;
+    int duracion_hora;
+    time_t inicio_real;
+    int apertura;
+    int cierre;
+    int inicio_sim;
+    int fin_sim;
+    volatile float* reloj;
+    int total_horas;
+    int* ocupacion;
+    char*** registros_familias;
+    int* contador_familias;
+    volatile char* terminado;
+    int* ingresos;
+} DatosReloj;
 
-/* prototipos */
-void *clock_thread(void *);
-void *listener_thread(void *);
-void send_time(int agent_pid);
-void process_reserve(msg_reserve_t *req);
-void advance_hour(void);
-void final_report(void);
-void cleanup(void);
-void sig_handler(int sig) { (void)sig; finish = 1; }  // <-- (void)sig elimina warning
+typedef struct {
+    int descriptor_lectura;
+    char** ids_clientes;
+    int* descriptores_escritura;
+    int* num_clientes;
+    volatile float* reloj;
+    int apertura;
+    int cierre;
+    int inicio_sim;
+    int fin_sim;
+    int capacidad;
+    int* ocupacion;
+    int total_horas;
+    char*** registros_familias;
+    int* contador_familias;
+    volatile char* terminado;
+    int* estadisticas;
+    int* ingresos;
+} DatosPipe;
 
-int main(int argc, char *argv[])
-{
-    int opt, horaIni = -1, horaFin = -1;
-    while ((opt = getopt(argc, argv, "i:f:s:t:p:")) != -1) {
-        switch (opt) {
-            case 'i': horaIni = atoi(optarg); break;
-            case 'f': horaFin = atoi(optarg); break;
-            case 's': seg_per_hour = atoi(optarg); break;
-            case 't': aforo_max = atoi(optarg); break;
-            case 'p': strncpy(pipe_server, optarg, MAX_PIPE_NAME-1); break;
-            default: fprintf(stderr,
-                    "Uso: %s -i horaIni -f horaFin -s segHoras -t total -p pipeRecibe\n",
-                    argv[0]); exit(EXIT_FAILURE);
+void parsear_argumentos(int argc, char* argv[], int* inicio, int* fin, int* seg, int* cap, char** tubo) {
+    for(int i=1; i<argc; i++){
+        if(*argv[i] == '-'){
+            switch (*(argv[i++]+1)) {
+                case 'i':
+                    *inicio = atoi(argv[i]);
+                    break;
+                case 'f':
+                    *fin = atoi(argv[i]);
+                    break;
+                case 's':
+                    *seg = atoi(argv[i]);
+                    break;
+                case 't':
+                    *cap = atoi(argv[i]);
+                    break;
+                case 'p':
+                    *tubo = argv[i];
+                    break;
+            }
         }
     }
-    if (horaIni < MIN_HOUR || horaIni > MAX_HOUR ||
-        horaFin < MIN_HOUR || horaFin > MAX_HOUR ||
-        horaIni > horaFin || seg_per_hour <= 0 || aforo_max <= 0 ||
-        pipe_server[0] == 0) {
-        fprintf(stderr, "Parámetros inválidos\n");
-        exit(EXIT_FAILURE);
+}
+
+void preparar_sistema(char* tubo, time_t* momento_inicio, int* fd_lect) {
+    if (mkfifo(tubo, 0666) == -1) {
+        perror("Error al crear FIFO");
     }
+    time(momento_inicio);
+    *fd_lect = open(tubo, O_RDONLY | O_NONBLOCK);
+    if(*fd_lect == -1){
+        perror("Error al abrir FIFO para lectura");
+        exit(1);
+    }
+}
 
-    current_hour = hour_index(horaIni);
+int dividir_mensaje(char mensaje[], char* fragmentos[]){
+    int cantidad = 0;
+    char* copia = strdup(mensaje);
+    char* token = strtok(mensaje, ",");
+    while(token != NULL){
+        fragmentos[cantidad++] = token;
+        token = strtok(NULL, ",");
+    }
+    if(cantidad == 1){
+        cantidad = 0;
+        token = strtok(copia, " ");
+        while(token != NULL){
+            fragmentos[cantidad++] = token;
+            token = strtok(NULL, " ");
+        }
+    }
+    return cantidad;
+}
 
-    /* crear pipe servidor */
-    unlink(pipe_server);
-    check(mkfifo(pipe_server, 0644), "mkfifo server");
-    int fd_server = open(pipe_server, O_RDONLY | O_NONBLOCK);
-    check(fd_server, "open server pipe");
+void registrar_cliente(char** fragmentos, char* ids[], int descriptores[], int* contador, float momento){
+    ids[*contador] = strdup(fragmentos[0]);
+    descriptores[*contador] = open(fragmentos[1], O_WRONLY);
+    if(descriptores[*contador] == -1){
+        perror("Error abrir FIFO de escritura");
+        exit(1);
+    }
+    write(descriptores[*contador], &momento, sizeof(float));
+    (*contador)++;
+}
 
-    /* señal para terminar limpiamente */
-    signal(SIGINT, sig_handler);
-    signal(SIGTERM, sig_handler);
-    atexit(cleanup);
-
-    /* hilo reloj y listener */
-    pthread_t th_clock, th_listener;
-    int *fd_ptr = &fd_server;  // <-- pasar puntero
-    pthread_create(&th_clock, NULL, clock_thread, fd_ptr);
-    pthread_create(&th_listener, NULL, listener_thread, fd_ptr);
-
-    pthread_join(th_clock, NULL);
-    pthread_join(th_listener, NULL);
+int asignar_espacio(int ocupacion[], int horas, int solicitada, int apertura, float momento, int cantidad, int capacidad, char*** registros, char* familia, int contador[], int* ingresos) {
+    int posicion = ((solicitada < momento ? ((int)momento + 1) : solicitada) - apertura);
+    for(int i=posicion; i<horas; i++){
+        if( (ocupacion[i] + cantidad) <= capacidad ){
+            if((i+1 < horas) && ((ocupacion[i+1] + cantidad) <= capacidad)){
+                ocupacion[i] += cantidad;
+                ocupacion[i+1] += cantidad;
+                char* duplicado = strdup(familia);
+                registros[i][contador[i]] = duplicado;
+                ingresos[i] += cantidad;
+                contador[i]++;
+                registros[i+1][contador[i+1]] = duplicado;
+                contador[i+1]++;
+                return (i + apertura);
+            }
+        }
+    }
     return 0;
 }
 
-/* ----------------- RELOJ ----------------- */
-void *clock_thread(void *arg)
-{
-    int fd_server = *(int *)arg;  // <-- usamos el fd
-    (void)fd_server;  // evitar warning si no se usa más
+void procesar_peticion(char** fragmentos, DatosPipe *datos) {
+    char* id_cliente = fragmentos[0];
+    char* nombre_grupo = fragmentos[1];
+    int hora_pedida = atoi(fragmentos[2]);
+    int cantidad_personas = atoi(fragmentos[3]);
+    char respuesta[100];
+    char tiene_respuesta = 0;
+    int hora_asignada;
 
-    while (!finish) {
-        sleep(seg_per_hour);
-        if (finish) break;
-        advance_hour();
-        /* avisar a los agentes que la hora cambió */
-        for (int i = 0; i < nclients; ++i) {
-            int fd = open(clients[i].pipe_name, O_WRONLY);
-            if (fd >= 0) {
-                msg_header_t h = { .type = MSG_TIME, .pid = getpid() };
-                write(fd, &h, sizeof(h));
-                int cur = current_hour + MIN_HOUR;
-                write(fd, &cur, sizeof(cur));
-                close(fd);
+    printf("Agente: %s, solicita reserva para la familia %s de %d personas a las %d:00\n", id_cliente, nombre_grupo, cantidad_personas, hora_pedida);
+
+    if(hora_pedida > datos->cierre || cantidad_personas > datos->capacidad || *(datos->reloj) >= datos->cierre){
+        snprintf(respuesta, 100, "Reserva negada, debe volver otro dia");
+        datos->estadisticas[2]++;
+        tiene_respuesta = 1;
+    }
+
+    if(tiene_respuesta == 0){
+        hora_asignada = asignar_espacio(datos->ocupacion, datos->total_horas, hora_pedida, datos->apertura,  *(datos->reloj), cantidad_personas, datos->capacidad, datos->registros_familias, nombre_grupo, datos->contador_familias, datos->ingresos);
+        if(hora_pedida < *(datos->reloj)){
+            tiene_respuesta = 1;
+            if(hora_asignada > hora_pedida){
+                snprintf(respuesta, 100, "Reserva negada por extemporánea, la nueva hora es %d:00", hora_asignada);
+                datos->estadisticas[1]++;
+            }else{
+                snprintf(respuesta, 100, "Reserva negada por extemporánea, no hay horas disponibles");
+                datos->estadisticas[2]++;
+            }
+        }
+
+        if(tiene_respuesta == 0){
+            if(hora_asignada == hora_pedida){
+                snprintf(respuesta, 100, "Reserva ok para la hora %d:00", hora_asignada);
+                datos->estadisticas[0]++;
+            }else if(hora_asignada > hora_pedida){
+                snprintf(respuesta, 100, "Reserva garantizada para otras horas, la nueva hora es %d:00", hora_asignada);
+                datos->estadisticas[1]++;
+            }
+            else if(hora_asignada == 0){
+                snprintf(respuesta, 100, "Reserva negada, debe volver otro dia");
+                datos->estadisticas[2]++;
             }
         }
     }
-    return NULL;
+
+    for(int i=0; i<*(datos->num_clientes); i++){
+        if(strcmp(datos->ids_clientes[i], id_cliente) == 0){
+            write(datos->descriptores_escritura[i], respuesta, strlen(respuesta)+1);
+            break;
+        }
+    }
 }
 
-/* ----------------- LISTENER ----------------- */
-void *listener_thread(void *arg)
-{
-    int fd_server = *(int *)arg;
-    char buf[MAX_MSG];
-    while (!finish) {
-        int r = read(fd_server, buf, sizeof(buf));
-        if (r > 0) {
-            msg_header_t *hdr = (msg_header_t *)buf;
-            switch (hdr->type) {
-                case MSG_REGISTER: {
-                    msg_register_t *reg = (msg_register_t *)buf;
-                    if (nclients < MAX_AGENTS) {
-                        clients[nclients].pid = reg->h.pid;
-                        strncpy(clients[nclients].pipe_name,
-                                reg->pipe_back, MAX_PIPE_NAME-1);
-                        nclients++;
-                        send_time(reg->h.pid);
+void cerrar_cliente(char** fragmentos, char* ids[], int descriptores[], int* contador) {
+    char* id_cliente = fragmentos[1];
+
+    for(int i=0; i<(*contador); i++){
+        if(strcmp(ids[i], id_cliente) == 0){
+            close(descriptores[i]);
+            (*contador)--;
+            for(int j=i; j<(*contador); j++){
+                ids[j] = ids[j+1];
+                descriptores[j] = descriptores[j+1];
+            }
+            break;
+        }
+    }
+}
+
+void* ejecutar_reloj(void* parametros){
+    DatosReloj* datos = (DatosReloj*)parametros;
+    float anterior = -1;
+    while(1){
+        time_t actual;
+        pthread_mutex_lock(&bloqueo);
+        time(&actual);
+        *(datos->reloj) = (difftime(actual, datos->inicio_real) / datos->duracion_hora) + datos->inicio_sim;
+
+        if((int)(*(datos->reloj)) != (int)anterior){
+            anterior = *(datos->reloj);
+            printf("\nHora actual: %.0f:00\n", *(datos->reloj));
+
+            if( (int)(*(datos->reloj)) >= datos->apertura && (int)(*(datos->reloj)) <= datos->cierre ){
+                int posicion = (int)(*(datos->reloj)) - datos->apertura;
+
+                if(posicion == datos->total_horas){
+                    printf("Han salido %d personas\n", datos->ocupacion[posicion-1]);
+                }else if(posicion > 0){
+                    int diferencia = datos->ocupacion[posicion-1] + datos->ingresos[posicion] - datos->ocupacion[posicion];
+                    printf("Han entrado %d personas\n", datos->ingresos[posicion]);
+                    printf("Han salido %d personas\n", diferencia);
+                }else if(posicion == 0){
+                    printf("Han entrado %d personas\n", datos->ocupacion[posicion]);
+                }
+
+                if(posicion == 0){
+                    printf("Familias que entran:\n");
+                    for(int j=0; j<datos->contador_familias[posicion]; j++){
+                        printf("- La familia %s ha entrado \n", datos->registros_familias[posicion][j]);
                     }
-                    break;
+                    
+                }else if(posicion != datos->total_horas){
+                    printf("Familias que entran:\n");
+                    for(int i=0; i<datos->contador_familias[posicion]; i++){
+                        for(int j=0; j<datos->contador_familias[posicion-1]; j++){
+                            if(datos->registros_familias[posicion][i] == datos->registros_familias[posicion-1][j]){
+                                break;
+                            }
+                            if(j == datos->contador_familias[posicion-1]-1){
+                                printf("- La familia %s ha entrado \n", datos->registros_familias[posicion][i]);
+                            }
+                        }
+                    }
+                    printf("Familias que salen:\n");
+                    for(int i=0; i<datos->contador_familias[posicion-1]; i++){
+                        for(int j=0; j<datos->contador_familias[posicion]; j++){
+                            if(datos->registros_familias[posicion-1][i] == datos->registros_familias[posicion][j]){
+                                break;
+                            }
+                            if(j == datos->contador_familias[posicion]-1){
+                                printf("- La familia %s ha salido \n", datos->registros_familias[posicion-1][i]);
+                                free(datos->registros_familias[posicion-1][i]);
+                            }
+                        }
+                    }
+
+                }else{
+                    printf("Familias que salen:\n");
+                    for(int j=0; j<datos->contador_familias[posicion-1]; j++){
+                        printf("- La familia %s ha salido \n", datos->registros_familias[posicion-1][j]);
+                        free(datos->registros_familias[posicion-1][j]);
+                    }
                 }
-                case MSG_RESERVE: {
-                    msg_reserve_t *req = (msg_reserve_t *)buf;
-                    process_reserve(req);  // <-- quitamos fd_server
-                    break;
-                }
-                default:
-                    break;
+                printf("\n");
             }
         }
-        usleep(100000);   // <-- ahora sí está declarado (ver abajo)
+
+        if(*(datos->reloj) >= datos->fin_sim){
+            *(datos->terminado) = 1;
+            break;
+        }
+
+        pthread_mutex_unlock(&bloqueo);
+        usleep(100000); 
     }
     return NULL;
 }
 
-/* enviar hora actual */
-void send_time(int agent_pid)
-{
-    for (int i = 0; i < nclients; ++i) {
-        if (clients[i].pid == agent_pid) {
-            int fd = open(clients[i].pipe_name, O_WRONLY);
-            if (fd >= 0) {
-                msg_header_t h = { .type = MSG_TIME, .pid = getpid() };
-                int cur = current_hour + MIN_HOUR;
-                write(fd, &h, sizeof(h));
-                write(fd, &cur, sizeof(cur));
-                close(fd);
+void* escuchar_tubo(void* parametros){
+    DatosPipe* datos = (DatosPipe*)parametros;
+    char buffer[TAM_BUFFER];
+    char* fragmentos[4];
+
+    while(*(datos->terminado) == 0){
+        ssize_t leidos = read(datos->descriptor_lectura, buffer, sizeof(buffer)-1);
+
+        if(leidos > 0){
+            buffer[leidos] = '\0';
+            int cantidad = dividir_mensaje(buffer, fragmentos);
+
+            pthread_mutex_lock(&bloqueo);
+            if(cantidad == 2){
+                registrar_cliente(fragmentos, datos->ids_clientes, datos->descriptores_escritura, datos->num_clientes, *(datos->reloj));
             }
-            break;
-        }
-    }
-}
-
-/* procesar reserva */
-void process_reserve(msg_reserve_t *req)  // <-- quitamos fd_server
-{
-    printf("[Controlador] Recibida petición de %s: hora %d, %d personas\n",
-           req->h.name, req->hour, req->people);
-
-    msg_response_t resp = {0};
-    resp.h.type = MSG_RESPONSE;
-    resp.h.pid  = getpid();
-    strncpy(resp.h.name, req->h.name, MAX_FAMILY-1);
-
-    int now = current_hour + MIN_HOUR;
-    if (req->hour < now) {
-        resp.ok = 0;
-        strcpy(resp.reason, "Reserva negada por extemporánea");
-        goto reprogram;
-    }
-
-    if (req->people > aforo_max) {
-        resp.ok = -1;
-        strcpy(resp.reason, "Número de personas excede aforo");
-        goto send;
-    }
-
-    int idx = hour_index(req->hour);
-    int idx2 = (idx + 1 < HOURS_DAY) ? idx + 1 : -1;
-
-    if (idx2 == -1 || park[idx].people + req->people <= aforo_max &&
-        park[idx2].people + req->people <= aforo_max) {
-        park[idx].people += req->people;
-        strncpy(park[idx].families[park[idx].nfam++], req->family, MAX_FAMILY-1);
-        if (idx2 != -1) {
-            park[idx2].people += req->people;
-            strncpy(park[idx2].families[park[idx2].nfam++], req->family, MAX_FAMILY-1);
-        }
-        resp.ok = 1;
-        resp.hour1 = req->hour;
-        resp.hour2 = (idx2 == -1) ? -1 : req->hour + 1;
-        stats_accepted++;
-        goto send;
-    }
-
-reprogram:
-    for (int h = now; h <= MAX_HOUR-1; ++h) {
-        int i1 = hour_index(h);
-        int i2 = i1 + 1;
-        if (park[i1].people + req->people <= aforo_max &&
-            park[i2].people + req->people <= aforo_max) {
-            park[i1].people += req->people;
-            strncpy(park[i1].families[park[i1].nfam++], req->family, MAX_FAMILY-1);
-            park[i2].people += req->people;
-            strncpy(park[i2].families[park[i2].nfam++], req->family, MAX_FAMILY-1);
-            resp.ok = 0;
-            resp.hour1 = h;
-            resp.hour2 = h + 1;
-            stats_reprogram++;
-            goto send;
-        }
-    }
-
-    resp.ok = -1;
-    strcpy(resp.reason, "Reserva negada, debe volver otro día");
-    stats_denied++;
-
-send:
-    for (int i = 0; i < nclients; ++i) {
-        if (clients[i].pid == req->h.pid) {
-            int fd = open(clients[i].pipe_name, O_WRONLY);
-            if (fd >= 0) {
-                write(fd, &resp, sizeof(resp));
-                close(fd);
+            else if(cantidad == 4){
+                procesar_peticion(fragmentos, datos);
             }
-            break;
+            else if(cantidad == 3){
+                cerrar_cliente(fragmentos, datos->ids_clientes, datos->descriptores_escritura, datos->num_clientes);
+            }
+            pthread_mutex_unlock(&bloqueo);
+        }
+        usleep(1000);
+    }
+    return NULL;
+}
+
+void generar_informe(int horas, int ocupacion[], int estadisticas[], int clientes, int descriptores[], int apertura, char* tubo, int fd_lect) {
+    char* msg_fin = "FIN";
+    for(int i=0; i<clientes; i++){
+        write(descriptores[i], msg_fin, strlen(msg_fin));
+        close(descriptores[i]);
+    }
+    
+    printf("\n----- Reporte Final -----\n");
+    int maximo = 0;
+    for(int i=0; i<horas; i++){
+        if(ocupacion[i] > maximo){
+            maximo = ocupacion[i];
         }
     }
-}
-
-/* avanzar hora */
-void advance_hour(void)
-{
-    int hora = current_hour + MIN_HOUR;
-    printf("\n=== HORA %02d:00 ===\n", hora);
-
-    if (current_hour > 0) {
-        int prev = current_hour - 1;
-        printf("Salen %d personas (%d familias)\n",
-               park[prev].people, park[prev].nfam);
-        park[prev].people = park[prev].nfam = 0;
-    }
-
-    printf("Entran %d personas (%d familias)\n",
-           park[current_hour].people, park[current_hour].nfam);
-
-    current_hour++;
-    if (current_hour + MIN_HOUR > MAX_HOUR) {
-        finish = 1;
-        final_report();
-    }
-}
-
-/* reporte final */
-void final_report(void)
-{
-    printf("\n=== REPORTE FINAL ===\n");
-    int maxp = 0, minp = 1<<30;
-    int hora_max[HOURS_DAY], hora_min[HOURS_DAY];
-    int nmax = 0, nmin = 0;
-
-    for (int i = 0; i < HOURS_DAY; ++i) {
-        int p = park[i].people;
-        int h = i + MIN_HOUR;
-        if (p > maxp) { maxp = p; nmax = 0; hora_max[nmax++] = h; }
-        else if (p == maxp) hora_max[nmax++] = h;
-
-        if (p < minp) { minp = p; nmin = 0; hora_min[nmin++] = h; }
-        else if (p == minp) hora_min[nmin++] = h;
-    }
-
-    printf("Horas pico (máx %d personas): ", maxp);
-    for (int i = 0; i < nmax; i++) printf("%d ", hora_max[i]);
-    printf("\n");
-
-    printf("Horas valle (mín %d personas): ", minp);
-    for (int i = 0; i < nmin; i++) printf("%d ", hora_min[i]);
-    printf("\n");
-
-    printf("Solicitudes aceptadas en hora: %d\n", stats_accepted);
-    printf("Solicitudes reprogramadas: %d\n", stats_reprogram);
-    printf("Solicitudes denegadas: %d\n", stats_denied);
-}
-
-/* limpieza */
-void cleanup(void)
-{
-    unlink(pipe_server);
-    for (int i = 0; i < nclients; ++i) {
-        int fd = open(clients[i].pipe_name, O_WRONLY);
-        if (fd >= 0) {
-            msg_header_t h = { .type = MSG_END };
-            write(fd, &h, sizeof(h));
-            close(fd);
+    printf("Horas pico:\n");
+    for(int i=0; i<horas; i++){
+        if(ocupacion[i] == maximo){
+            printf("- %d:00 con %d personas \n", i+apertura, maximo);
         }
-        unlink(clients[i].pipe_name);
     }
+
+    int minimo = maximo;
+    for(int i=0; i<horas; i++){
+        if(ocupacion[i] < minimo){
+            minimo = ocupacion[i];
+        }
+    }
+    printf("\nHoras con menor numero de personas:\n");
+    for(int i=0; i<horas; i++){
+        if(ocupacion[i] == minimo){
+            printf("- %d:00 con %d personas \n", i+apertura, minimo);
+        }
+    }
+
+    printf("\nCantidad de solicitudes OK: %d\n", estadisticas[0]);
+    printf("Cantidad de solicitudes re-programadas: %d\n", estadisticas[1]);
+    printf("Cantidad de solicitudes negadas: %d\n", estadisticas[2]);
+
+    close(fd_lect);
+    unlink(tubo);
+}
+
+int main(int argc, char *argv[]){
+    int inicio, fin, duracion, capacidad;
+    char* tubo;
+    time_t momento_inicio;
+    volatile float reloj = 0;
+    int fd_lect;
+    volatile char terminado = 0;
+    char* ids[LIMITE_CLIENTES];
+    int descriptores[LIMITE_CLIENTES];
+    int clientes_activos = 0;
+    int estadisticas[3]={0,0,0};
+
+    parsear_argumentos(argc, argv, &inicio, &fin, &duracion, &capacidad, &tubo);
+
+    if(inicio >= fin || duracion <= 0 || capacidad <= 0){
+        printf("Error: Parámetros de ejecución inválidos.\n");
+        return(1);
+    }
+
+    pthread_mutex_init(&bloqueo, NULL);
+    int apertura = (inicio <= 7) ? 7 : inicio;
+    int cierre = (fin <= 19) ? fin : 19;
+    int horas = (fin == apertura) ? 1 : cierre - apertura;
+    int ocupacion[horas];
+
+    for(int i=0;i<horas;i++){
+        ocupacion[i]=0;
+    }
+
+    int ingresos[horas];
+    for(int i=0;i<horas;i++){
+        ingresos[i]=0;
+    }
+
+    int contadores[horas];
+    for(int i=0;i<horas;i++){
+        contadores[i]=0;
+    }
+
+    char*** registros = malloc(horas * sizeof(char**));
+    for(int i=0;i<horas;i++) registros[i] = malloc(capacidad * sizeof(char*));
+
+    preparar_sistema(tubo, &momento_inicio, &fd_lect);
+
+    pthread_t hilo_reloj, hilo_tubo;
+
+    DatosReloj parametros_reloj = {duracion, momento_inicio, apertura, cierre, inicio, fin, &reloj, horas, ocupacion, registros, contadores, &terminado, ingresos};
+    DatosPipe parametros_tubo = {fd_lect, ids, descriptores, &clientes_activos, &reloj, apertura, cierre, inicio, fin, capacidad, ocupacion, horas, registros, contadores, &terminado, estadisticas, ingresos};
+
+    pthread_create(&hilo_reloj, NULL, ejecutar_reloj, &parametros_reloj);
+    pthread_create(&hilo_tubo, NULL, escuchar_tubo, &parametros_tubo);
+
+    pthread_join(hilo_reloj, NULL);
+    pthread_join(hilo_tubo, NULL);
+
+    generar_informe(horas, ocupacion, estadisticas, clientes_activos, descriptores, apertura, tubo, fd_lect);
+
+    pthread_mutex_destroy(&bloqueo);
+
+    for (int i = 0; i < horas; i++) {
+        free(registros[i]);
+    }
+    free(registros);
+
+    return 0;
 }
