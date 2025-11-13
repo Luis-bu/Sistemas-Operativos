@@ -42,32 +42,52 @@ void conectar_servidor(char* tubo_principal, char* id_proceso, float* momento_si
     write(*desc_envio, msg_inicial, sizeof(msg_inicial));
     usleep(100000);
     read(*desc_recibo, momento_sistema, sizeof(float));
+    
+    printf("\n╔════════════════════════════════════════╗\n");
+    printf("║    PROCESO CLIENTE INICIALIZADO       ║\n");
+    printf("╚════════════════════════════════════════╝\n");
+    printf("» ID del proceso: %s\n", id_proceso);
+    printf("» Hora sistema: %.0f:00\n", *momento_sistema);
+    printf("» Estado: CONECTADO\n");
+    printf("════════════════════════════════════════\n\n");
 }
 
 void procesar_solicitudes(char* ruta_archivo, int desc_envio, float momento_sistema, int desc_recibo, char* id_proceso, char* tubo_respuesta) {
     FILE* entrada = fopen(ruta_archivo, "r");
     if (entrada == NULL) {
-        printf("Error al abrir el archivo");
+        printf("[ERROR] No se pudo acceder al archivo de datos\n");
         return;
     }
 
     char registro[50];
     char respuesta[100];
     char finalizado = 1;
+    int num_solicitud = 0;
+    
+    printf("┌─ Iniciando procesamiento de solicitudes\n");
     
     while (fgets(registro, sizeof(registro), entrada)) {
         finalizado = 0;
         char temporal[50]; 
         strcpy(temporal, registro);
-        strtok(temporal, ",");
+        char* nombre_grupo = strtok(temporal, ",");
         char* token = strtok(NULL, ",");
         int hora_pedida = atoi(token);
+        token = strtok(NULL, ",");
+        int personas = atoi(token);
         
         if (hora_pedida > momento_sistema) {
+            num_solicitud++;
             char peticion[100];
             snprintf(peticion, 100, "%s,%s%s", id_proceso, registro, feof(entrada) ? "\n" : "");
+            
+            printf("│\n├─ [SOLICITUD #%d]\n", num_solicitud);
+            printf("│  ├─ Grupo: %s\n", nombre_grupo);
+            printf("│  ├─ Horario solicitado: %d:00\n", hora_pedida);
+            printf("│  ├─ Cantidad personas: %d\n", personas);
+            printf("│  └─ Estado: ENVIANDO...\n");
+            
             write(desc_envio, peticion, strlen(peticion)+1);
-            printf("%s", peticion);
 
             usleep(10000);
 
@@ -75,10 +95,11 @@ void procesar_solicitudes(char* ruta_archivo, int desc_envio, float momento_sist
             if(recibido > 0){
                 respuesta[recibido] = '\0';
                 if(strcmp(respuesta, "FIN") == 0){
+                    printf("│  └─ SERVIDOR FINALIZADO\n");
                     break;
                 }
                 else{
-                    printf("Respuesta del controlador: %s\n", respuesta);
+                    printf("│  └─ RESPUESTA: %s\n", respuesta);
                 }
             }
 
@@ -88,9 +109,13 @@ void procesar_solicitudes(char* ruta_archivo, int desc_envio, float momento_sist
             if(recibido > 0){
                 respuesta[recibido] = '\0';
                 if(strcmp(respuesta, "FIN") == 0){
+                    printf("│  └─ SERVIDOR FINALIZADO\n");
                     break;
                 }
             }
+        } else {
+            printf("│\n├─ [SOLICITUD OMITIDA]\n");
+            printf("│  └─ Grupo %s solicita hora %d:00 (anterior al tiempo actual)\n", nombre_grupo, hora_pedida);
         }
         finalizado = 1;
     }
@@ -99,6 +124,15 @@ void procesar_solicitudes(char* ruta_archivo, int desc_envio, float momento_sist
         char msg_cierre[40];
         snprintf(msg_cierre, 40, "Agente %s termina.", id_proceso);
         write(desc_envio, msg_cierre, strlen(msg_cierre)+1);
+        
+        printf("│\n└─ Todas las solicitudes han sido procesadas\n\n");
+        printf("╔════════════════════════════════════════╗\n");
+        printf("║      PROCESO CLIENTE FINALIZADO       ║\n");
+        printf("╚════════════════════════════════════════╝\n");
+        printf("» Cliente: %s\n", id_proceso);
+        printf("» Solicitudes tramitadas: %d\n", num_solicitud);
+        printf("» Estado: DESCONECTADO\n");
+        printf("════════════════════════════════════════\n\n");
     }
 
     fclose(entrada);

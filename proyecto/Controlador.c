@@ -145,10 +145,10 @@ void procesar_peticion(char** fragmentos, DatosPipe *datos) {
     char tiene_respuesta = 0;
     int hora_asignada;
 
-    printf("Agente: %s, solicita reserva para la familia %s de %d personas a las %d:00\n", id_cliente, nombre_grupo, cantidad_personas, hora_pedida);
+    printf("[PETICION] Cliente %s solicita espacio para grupo %s (%d personas) - Hora deseada: %d:00\n", id_cliente, nombre_grupo, cantidad_personas, hora_pedida);
 
     if(hora_pedida > datos->cierre || cantidad_personas > datos->capacidad || *(datos->reloj) >= datos->cierre){
-        snprintf(respuesta, 100, "Reserva negada, debe volver otro dia");
+        snprintf(respuesta, 100, "DENEGADO: Solicitud fuera de rango operativo");
         datos->estadisticas[2]++;
         tiene_respuesta = 1;
     }
@@ -158,24 +158,24 @@ void procesar_peticion(char** fragmentos, DatosPipe *datos) {
         if(hora_pedida < *(datos->reloj)){
             tiene_respuesta = 1;
             if(hora_asignada > hora_pedida){
-                snprintf(respuesta, 100, "Reserva negada por extemporánea, la nueva hora es %d:00", hora_asignada);
+                snprintf(respuesta, 100, "REPROGRAMADO: Hora extemporanea - Nueva asignacion: %d:00", hora_asignada);
                 datos->estadisticas[1]++;
             }else{
-                snprintf(respuesta, 100, "Reserva negada por extemporánea, no hay horas disponibles");
+                snprintf(respuesta, 100, "DENEGADO: Hora extemporanea sin disponibilidad posterior");
                 datos->estadisticas[2]++;
             }
         }
 
         if(tiene_respuesta == 0){
             if(hora_asignada == hora_pedida){
-                snprintf(respuesta, 100, "Reserva ok para la hora %d:00", hora_asignada);
+                snprintf(respuesta, 100, "CONFIRMADO: Espacios asignados para %d:00", hora_asignada);
                 datos->estadisticas[0]++;
             }else if(hora_asignada > hora_pedida){
-                snprintf(respuesta, 100, "Reserva garantizada para otras horas, la nueva hora es %d:00", hora_asignada);
+                snprintf(respuesta, 100, "REPROGRAMADO: Sin cupo - Nueva asignacion: %d:00", hora_asignada);
                 datos->estadisticas[1]++;
             }
             else if(hora_asignada == 0){
-                snprintf(respuesta, 100, "Reserva negada, debe volver otro dia");
+                snprintf(respuesta, 100, "DENEGADO: Capacidad insuficiente en todas las franjas");
                 datos->estadisticas[2]++;
             }
         }
@@ -216,56 +216,56 @@ void* ejecutar_reloj(void* parametros){
 
         if((int)(*(datos->reloj)) != (int)anterior){
             anterior = *(datos->reloj);
-            printf("\nHora actual: %.0f:00\n", *(datos->reloj));
+            printf("\n========== TIEMPO: %.0f:00 ==========\n", *(datos->reloj));
 
             if( (int)(*(datos->reloj)) >= datos->apertura && (int)(*(datos->reloj)) <= datos->cierre ){
                 int posicion = (int)(*(datos->reloj)) - datos->apertura;
 
                 if(posicion == datos->total_horas){
-                    printf("Han salido %d personas\n", datos->ocupacion[posicion-1]);
+                    printf(">> Salidas: %d personas abandonan las instalaciones\n", datos->ocupacion[posicion-1]);
                 }else if(posicion > 0){
                     int diferencia = datos->ocupacion[posicion-1] + datos->ingresos[posicion] - datos->ocupacion[posicion];
-                    printf("Han entrado %d personas\n", datos->ingresos[posicion]);
-                    printf("Han salido %d personas\n", diferencia);
+                    printf(">> Ingresos: %d personas acceden al parque\n", datos->ingresos[posicion]);
+                    printf(">> Salidas: %d personas abandonan las instalaciones\n", diferencia);
                 }else if(posicion == 0){
-                    printf("Han entrado %d personas\n", datos->ocupacion[posicion]);
+                    printf(">> Ingresos: %d personas acceden al parque\n", datos->ocupacion[posicion]);
                 }
 
                 if(posicion == 0){
-                    printf("Familias que entran:\n");
+                    printf("-- Grupos que ingresan:\n");
                     for(int j=0; j<datos->contador_familias[posicion]; j++){
-                        printf("- La familia %s ha entrado \n", datos->registros_familias[posicion][j]);
+                        printf("   * Grupo %s (ingreso confirmado)\n", datos->registros_familias[posicion][j]);
                     }
                     
                 }else if(posicion != datos->total_horas){
-                    printf("Familias que entran:\n");
+                    printf("-- Grupos que ingresan:\n");
                     for(int i=0; i<datos->contador_familias[posicion]; i++){
                         for(int j=0; j<datos->contador_familias[posicion-1]; j++){
                             if(datos->registros_familias[posicion][i] == datos->registros_familias[posicion-1][j]){
                                 break;
                             }
                             if(j == datos->contador_familias[posicion-1]-1){
-                                printf("- La familia %s ha entrado \n", datos->registros_familias[posicion][i]);
+                                printf("   * Grupo %s (ingreso confirmado)\n", datos->registros_familias[posicion][i]);
                             }
                         }
                     }
-                    printf("Familias que salen:\n");
+                    printf("-- Grupos que se retiran:\n");
                     for(int i=0; i<datos->contador_familias[posicion-1]; i++){
                         for(int j=0; j<datos->contador_familias[posicion]; j++){
                             if(datos->registros_familias[posicion-1][i] == datos->registros_familias[posicion][j]){
                                 break;
                             }
                             if(j == datos->contador_familias[posicion]-1){
-                                printf("- La familia %s ha salido \n", datos->registros_familias[posicion-1][i]);
+                                printf("   * Grupo %s (salida registrada)\n", datos->registros_familias[posicion-1][i]);
                                 free(datos->registros_familias[posicion-1][i]);
                             }
                         }
                     }
 
                 }else{
-                    printf("Familias que salen:\n");
+                    printf("-- Grupos que se retiran:\n");
                     for(int j=0; j<datos->contador_familias[posicion-1]; j++){
-                        printf("- La familia %s ha salido \n", datos->registros_familias[posicion-1][j]);
+                        printf("   * Grupo %s (salida registrada)\n", datos->registros_familias[posicion-1][j]);
                         free(datos->registros_familias[posicion-1][j]);
                     }
                 }
@@ -320,17 +320,19 @@ void generar_informe(int horas, int ocupacion[], int estadisticas[], int cliente
         close(descriptores[i]);
     }
     
-    printf("\n----- Reporte Final -----\n");
+    printf("\n╔════════════════════════════════════════╗\n");
+    printf("║     INFORME FINAL DE OPERACIONES      ║\n");
+    printf("╚════════════════════════════════════════╝\n\n");
     int maximo = 0;
     for(int i=0; i<horas; i++){
         if(ocupacion[i] > maximo){
             maximo = ocupacion[i];
         }
     }
-    printf("Horas pico:\n");
+    printf("📊 PERIODOS DE MAXIMA OCUPACION:\n");
     for(int i=0; i<horas; i++){
         if(ocupacion[i] == maximo){
-            printf("- %d:00 con %d personas \n", i+apertura, maximo);
+            printf("   └─ Franja horaria %d:00 → %d visitantes\n", i+apertura, maximo);
         }
     }
 
@@ -340,16 +342,18 @@ void generar_informe(int horas, int ocupacion[], int estadisticas[], int cliente
             minimo = ocupacion[i];
         }
     }
-    printf("\nHoras con menor numero de personas:\n");
+    printf("\n📉 PERIODOS DE MINIMA OCUPACION:\n");
     for(int i=0; i<horas; i++){
         if(ocupacion[i] == minimo){
-            printf("- %d:00 con %d personas \n", i+apertura, minimo);
+            printf("   └─ Franja horaria %d:00 → %d visitantes\n", i+apertura, minimo);
         }
     }
 
-    printf("\nCantidad de solicitudes OK: %d\n", estadisticas[0]);
-    printf("Cantidad de solicitudes re-programadas: %d\n", estadisticas[1]);
-    printf("Cantidad de solicitudes negadas: %d\n", estadisticas[2]);
+    printf("\n📋 RESUMEN DE SOLICITUDES PROCESADAS:\n");
+    printf("   ✓ Aprobadas en horario solicitado: %d\n", estadisticas[0]);
+    printf("   ↻ Reprogramadas a otro horario: %d\n", estadisticas[1]);
+    printf("   ✗ Rechazadas definitivamente: %d\n", estadisticas[2]);
+    printf("\n════════════════════════════════════════\n");
 
     close(fd_lect);
     unlink(tubo);
