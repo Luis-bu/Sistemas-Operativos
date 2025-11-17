@@ -1,11 +1,11 @@
-#include <stdio.h>      // Entrada/salida estándar
-#include <stdlib.h>     // Funciones generales (atoi, exit)
-#include <string.h>     // Manejo de cadenas (strtok, strcpy)
-#include <time.h>       // Tiempos (sleep/usleep)
-#include <sys/types.h>  // Tipos del sistema
-#include <sys/stat.h>   // Para crear FIFO (mkfifo)
-#include <unistd.h>     // read, write, close, usleep
-#include <fcntl.h>      // open con flags
+#include <stdio.h>    
+#include <stdlib.h>    
+#include <string.h>     
+#include <time.h>       
+#include <sys/types.h>  
+#include <sys/stat.h>   
+#include <unistd.h>     
+#include <fcntl.h>      
 
 // Extrae parámetros -s (id), -a (archivo), -p (pipe principal)
 void extraer_parametros(int argc, char* argv[], char** id_proceso, char** ruta_archivo, char** tubo_principal) {
