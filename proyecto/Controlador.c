@@ -9,78 +9,70 @@
 #include <sys/stat.h>
 #include <math.h>
 
-#define LIMITE_CLIENTES 10
-#define TAM_BUFFER 256
+#define LIMITE_CLIENTES 10   // Máx. clientes simultáneos
+#define TAM_BUFFER 256        // Tamaño de lectura
 
-pthread_mutex_t bloqueo;
+pthread_mutex_t bloqueo;      // Mutex para proteger secciones críticas
 
+// Datos usados por el hilo que simula el reloj
 typedef struct {
-    int duracion_hora;
-    time_t inicio_real;
-    int apertura;
-    int cierre;
-    int inicio_sim;
-    int fin_sim;
-    volatile float* reloj;
-    int total_horas;
-    int* ocupacion;
-    char*** registros_familias;
-    int* contador_familias;
-    volatile char* terminado;
-    int* ingresos;
+    int duracion_hora;            // Duración de 1h simulada (en seg reales)
+    time_t inicio_real;           // Momento real de inicio
+    int apertura;                 // Hora de apertura parque
+    int cierre;                   // Hora de cierre parque
+    int inicio_sim;               // Inicio simulación
+    int fin_sim;                  // Fin simulación
+    volatile float* reloj;        // Hora simulada
+    int total_horas;              // Horas totales del día
+    int* ocupacion;               // Ocupación por hora
+    char*** registros_familias;   // Familias que ingresan por hora
+    int* contador_familias;       // Cuántas familias entran por hora
+    volatile char* terminado;     // Marca de finalización
+    int* ingresos;                // Personas que ingresan por hora
 } DatosReloj;
 
+// Datos usados por el hilo que atiende el pipe principal
 typedef struct {
-    int descriptor_lectura;
-    char** ids_clientes;
-    int* descriptores_escritura;
-    int* num_clientes;
-    volatile float* reloj;
-    int apertura;
-    int cierre;
-    int inicio_sim;
-    int fin_sim;
-    int capacidad;
-    int* ocupacion;
+    int descriptor_lectura;       // FIFO principal
+    char** ids_clientes;          // IDs de clientes registrados
+    int* descriptores_escritura;  // Pipes privados de los clientes
+    int* num_clientes;            // Nº clientes conectados
+    volatile float* reloj;        // Hora actual
+    int apertura, cierre;         // Franja operativa
+    int inicio_sim, fin_sim;      // Rango de simulación
+    int capacidad;                // Capacidad del parque
+    int* ocupacion;               // Ocupación por hora
     int total_horas;
-    char*** registros_familias;
-    int* contador_familias;
+    char*** registros_familias;   // Familias por hora
+    int* contador_familias;       // Contadores por hora
     volatile char* terminado;
-    int* estadisticas;
-    int* ingresos;
+    int* estadisticas;            // Confirmadas / Reprogramadas / Denegadas
+    int* ingresos;                // Entradas por hora
 } DatosPipe;
+
 
 void parsear_argumentos(int argc, char* argv[], int* inicio, int* fin, int* seg, int* cap, char** tubo) {
     for(int i=1; i<argc; i++){
         if(*argv[i] == '-'){
             switch (*(argv[i++]+1)) {
-                case 'i':
-                    *inicio = atoi(argv[i]);
-                    break;
-                case 'f':
-                    *fin = atoi(argv[i]);
-                    break;
-                case 's':
-                    *seg = atoi(argv[i]);
-                    break;
-                case 't':
-                    *cap = atoi(argv[i]);
-                    break;
-                case 'p':
-                    *tubo = argv[i];
-                    break;
+                case 'i': *inicio = atoi(argv[i]); break;     // Hora inicio simulación
+                case 'f': *fin = atoi(argv[i]); break;        // Hora fin simulación
+                case 's': *seg = atoi(argv[i]); break;        // Segundos por hora
+                case 't': *cap = atoi(argv[i]); break;        // Capacidad total parque
+                case 'p': *tubo = argv[i]; break;             // FIFO principal
             }
         }
     }
 }
 
+
 void preparar_sistema(char* tubo, time_t* momento_inicio, int* fd_lect) {
-    if (mkfifo(tubo, 0666) == -1) {
+    if (mkfifo(tubo, 0666) == -1) { // Crear FIFO principal
         perror("Error al crear FIFO");
     }
-    time(momento_inicio);
-    *fd_lect = open(tubo, O_RDONLY | O_NONBLOCK);
-    if(*fd_lect == -1){
+    time(momento_inicio);  // Guardar tiempo de inicio real
+    *fd_lect = open(tubo, O_RDONLY | O_NONBLOCK);  // Abrir FIFO en lectura non-blocking
+    if(*fd_lect == -1){ 
         perror("Error al abrir FIFO para lectura");
         exit(1);
     }
@@ -88,12 +80,15 @@ void preparar_sistema(char* tubo, time_t* momento_inicio, int* fd_lect) {
 
 int dividir_mensaje(char mensaje[], char* fragmentos[]){
     int cantidad = 0;
-    char* copia = strdup(mensaje);
+    char* copia = strdup(mensaje);        // Copia de seguridad
     char* token = strtok(mensaje, ",");
-    while(token != NULL){
+
+    while(token != NULL){                 // Separar por comas
         fragmentos[cantidad++] = token;
         token = strtok(NULL, ",");
     }
+
+    // Si no venía separado por comas, separar por espacios
     if(cantidad == 1){
         cantidad = 0;
         token = strtok(copia, " ");
@@ -102,100 +97,121 @@ int dividir_mensaje(char mensaje[], char* fragmentos[]){
             token = strtok(NULL, " ");
         }
     }
-    return cantidad;
+
+    return cantidad;                       // Devuelve número de partes
 }
 
+
 void registrar_cliente(char** fragmentos, char* ids[], int descriptores[], int* contador, float momento){
-    ids[*contador] = strdup(fragmentos[0]);
-    descriptores[*contador] = open(fragmentos[1], O_WRONLY);
+    ids[*contador] = strdup(fragmentos[0]);                     // Guardar ID del cliente
+    descriptores[*contador] = open(fragmentos[1], O_WRONLY);    // Abrir FIFO privado del cliente
     if(descriptores[*contador] == -1){
         perror("Error abrir FIFO de escritura");
         exit(1);
     }
-    write(descriptores[*contador], &momento, sizeof(float));
-    (*contador)++;
+    write(descriptores[*contador], &momento, sizeof(float));    // Enviar hora actual
+    (*contador)++;                                              // Aumentar nº clientes
 }
 
-int asignar_espacio(int ocupacion[], int horas, int solicitada, int apertura, float momento, int cantidad, int capacidad, char*** registros, char* familia, int contador[], int* ingresos) {
+int asignar_espacio(int ocupacion[], int horas, int solicitada,
+    int apertura, float momento, int cantidad, int capacidad,
+    char*** registros, char* familia, int contador[], int* ingresos) {
+
     int posicion = ((solicitada < momento ? ((int)momento + 1) : solicitada) - apertura);
+
+    // Buscar una hora donde haya espacio
     for(int i=posicion; i<horas; i++){
         if( (ocupacion[i] + cantidad) <= capacidad ){
             if((i+1 < horas) && ((ocupacion[i+1] + cantidad) <= capacidad)){
-                ocupacion[i] += cantidad;
-                ocupacion[i+1] += cantidad;
-                char* duplicado = strdup(familia);
+
+                ocupacion[i] += cantidad;   // Registrar ocupación hora 1
+                ocupacion[i+1] += cantidad; // Registrar ocupación hora 2
+
+                char* duplicado = strdup(familia); // Guardar familia en registros
+
                 registros[i][contador[i]] = duplicado;
                 ingresos[i] += cantidad;
                 contador[i]++;
+
                 registros[i+1][contador[i+1]] = duplicado;
                 contador[i+1]++;
-                return (i + apertura);
+
+                return (i + apertura);      // Devolver hora asignada
             }
         }
     }
-    return 0;
+
+    return 0;   // No hay cupo
 }
 
-void procesar_peticion(char** fragmentos, DatosPipe *datos) {
-    char* id_cliente = fragmentos[0];
-    char* nombre_grupo = fragmentos[1];
-    int hora_pedida = atoi(fragmentos[2]);
-    int cantidad_personas = atoi(fragmentos[3]);
+
+void procesar_peticion(char** f, DatosPipe *d) {
+
+    char* id_cliente = f[0];
+    char* nombre = f[1];
+    int hora = atoi(f[2]);
+    int personas = atoi(f[3]);
     char respuesta[100];
     char tiene_respuesta = 0;
     int hora_asignada;
 
-    printf("[PETICION] Cliente %s solicita espacio para grupo %s (%d personas) - Hora deseada: %d:00\n", id_cliente, nombre_grupo, cantidad_personas, hora_pedida);
-
-    if(hora_pedida > datos->cierre || cantidad_personas > datos->capacidad || *(datos->reloj) >= datos->cierre){
+    // Validaciones iniciales
+    if(hora > d->cierre || personas > d->capacidad || *(d->reloj) >= d->cierre){
         snprintf(respuesta, 100, "DENEGADO: Solicitud fuera de rango operativo");
-        datos->estadisticas[2]++;
+        d->estadisticas[2]++;
         tiene_respuesta = 1;
     }
 
     if(tiene_respuesta == 0){
-        hora_asignada = asignar_espacio(datos->ocupacion, datos->total_horas, hora_pedida, datos->apertura,  *(datos->reloj), cantidad_personas, datos->capacidad, datos->registros_familias, nombre_grupo, datos->contador_familias, datos->ingresos);
-        if(hora_pedida < *(datos->reloj)){
+        hora_asignada = asignar_espacio(...);
+
+        // Caso hora pasada
+        if(hora < *(d->reloj)){
             tiene_respuesta = 1;
-            if(hora_asignada > hora_pedida){
-                snprintf(respuesta, 100, "REPROGRAMADO: Hora extemporanea - Nueva asignacion: %d:00", hora_asignada);
-                datos->estadisticas[1]++;
-            }else{
-                snprintf(respuesta, 100, "DENEGADO: Hora extemporanea sin disponibilidad posterior");
-                datos->estadisticas[2]++;
+            if(hora_asignada > hora){
+                snprintf(respuesta, 100, "REPROGRAMADO: ... %d:00", hora_asignada);
+                d->estadisticas[1]++;
+            } else {
+                snprintf(respuesta, 100, "DENEGADO: ...");
+                d->estadisticas[2]++;
             }
         }
 
+        // Horario válido
         if(tiene_respuesta == 0){
-            if(hora_asignada == hora_pedida){
-                snprintf(respuesta, 100, "CONFIRMADO: Espacios asignados para %d:00", hora_asignada);
-                datos->estadisticas[0]++;
-            }else if(hora_asignada > hora_pedida){
-                snprintf(respuesta, 100, "REPROGRAMADO: Sin cupo - Nueva asignacion: %d:00", hora_asignada);
-                datos->estadisticas[1]++;
-            }
-            else if(hora_asignada == 0){
-                snprintf(respuesta, 100, "DENEGADO: Capacidad insuficiente en todas las franjas");
-                datos->estadisticas[2]++;
+            if(hora_asignada == hora){
+                snprintf(respuesta, 100, "CONFIRMADO: ...");
+                d->estadisticas[0]++;
+            } else if(hora_asignada > hora){
+                snprintf(respuesta, 100, "REPROGRAMADO: ...");
+                d->estadisticas[1]++;
+            } else {
+                snprintf(respuesta, 100, "DENEGADO: ...");
+                d->estadisticas[2]++;
             }
         }
     }
 
-    for(int i=0; i<*(datos->num_clientes); i++){
-        if(strcmp(datos->ids_clientes[i], id_cliente) == 0){
-            write(datos->descriptores_escritura[i], respuesta, strlen(respuesta)+1);
+    // Enviar la respuesta al cliente correspondiente
+    for(int i=0; i<*(d->num_clientes); i++){
+        if(strcmp(d->ids_clientes[i], id_cliente) == 0){
+            write(d->descriptores_escritura[i], respuesta, strlen(respuesta)+1);
             break;
         }
     }
 }
 
-void cerrar_cliente(char** fragmentos, char* ids[], int descriptores[], int* contador) {
-    char* id_cliente = fragmentos[1];
 
+void cerrar_cliente(char** f, char* ids[], int descriptores[], int* contador) {
+    char* id = f[1];
+
+    // Buscar cliente y quitarlo del arreglo
     for(int i=0; i<(*contador); i++){
-        if(strcmp(ids[i], id_cliente) == 0){
+        if(strcmp(ids[i], id) == 0){
             close(descriptores[i]);
             (*contador)--;
+
+            // Compactar arreglo
             for(int j=i; j<(*contador); j++){
                 ids[j] = ids[j+1];
                 descriptores[j] = descriptores[j+1];
@@ -205,19 +221,22 @@ void cerrar_cliente(char** fragmentos, char* ids[], int descriptores[], int* con
     }
 }
 
+
 void* ejecutar_reloj(void* parametros){
     DatosReloj* datos = (DatosReloj*)parametros;
     float anterior = -1;
     while(1){
+        // Calcular hora simulada
         time_t actual;
         pthread_mutex_lock(&bloqueo);
         time(&actual);
         *(datos->reloj) = (difftime(actual, datos->inicio_real) / datos->duracion_hora) + datos->inicio_sim;
-
+        // Imprimir cambios de hora
         if((int)(*(datos->reloj)) != (int)anterior){
             anterior = *(datos->reloj);
             printf("\n========== TIEMPO: %.0f:00 ==========\n", *(datos->reloj));
-
+             // Cálculo de entradas y salidas por hora...
+            // (Lógica de ocupación del parque)
             if( (int)(*(datos->reloj)) >= datos->apertura && (int)(*(datos->reloj)) <= datos->cierre ){
                 int posicion = (int)(*(datos->reloj)) - datos->apertura;
 
@@ -272,7 +291,7 @@ void* ejecutar_reloj(void* parametros){
                 printf("\n");
             }
         }
-
+         // Fin de simulación
         if(*(datos->reloj) >= datos->fin_sim){
             *(datos->terminado) = 1;
             break;
@@ -315,6 +334,7 @@ void* escuchar_tubo(void* parametros){
 
 void generar_informe(int horas, int ocupacion[], int estadisticas[], int clientes, int descriptores[], int apertura, char* tubo, int fd_lect) {
     char* msg_fin = "FIN";
+    // Enviar "FIN" a todos los clientes
     for(int i=0; i<clientes; i++){
         write(descriptores[i], msg_fin, strlen(msg_fin));
         close(descriptores[i]);
@@ -324,6 +344,8 @@ void generar_informe(int horas, int ocupacion[], int estadisticas[], int cliente
     printf("║     INFORME FINAL DE OPERACIONES      ║\n");
     printf("╚════════════════════════════════════════╝\n\n");
     int maximo = 0;
+    // Cálculo de franjas con mayor y menor ocupación
+    // Resumen de estadísticas de solicitudes
     for(int i=0; i<horas; i++){
         if(ocupacion[i] > maximo){
             maximo = ocupacion[i];
@@ -356,7 +378,7 @@ void generar_informe(int horas, int ocupacion[], int estadisticas[], int cliente
     printf("\n════════════════════════════════════════\n");
 
     close(fd_lect);
-    unlink(tubo);
+    unlink(tubo); // Eliminar FIFO principal
 }
 
 int main(int argc, char *argv[]){
@@ -370,15 +392,16 @@ int main(int argc, char *argv[]){
     int descriptores[LIMITE_CLIENTES];
     int clientes_activos = 0;
     int estadisticas[3]={0,0,0};
-
+    // Leer parámetros
     parsear_argumentos(argc, argv, &inicio, &fin, &duracion, &capacidad, &tubo);
-
+     // Validar entrada
     if(inicio >= fin || duracion <= 0 || capacidad <= 0){
         printf("Error: Parámetros de ejecución inválidos.\n");
         return(1);
     }
 
     pthread_mutex_init(&bloqueo, NULL);
+    // Ajustar apertura/cierre reales del parque (7–19)
     int apertura = (inicio <= 7) ? 7 : inicio;
     int cierre = (fin <= 19) ? fin : 19;
     int horas = (fin == apertura) ? 1 : cierre - apertura;
@@ -400,9 +423,9 @@ int main(int argc, char *argv[]){
 
     char*** registros = malloc(horas * sizeof(char**));
     for(int i=0;i<horas;i++) registros[i] = malloc(capacidad * sizeof(char*));
-
+     // Inicializar estructuras internas
     preparar_sistema(tubo, &momento_inicio, &fd_lect);
-
+    // Crear hilos del reloj y pipe
     pthread_t hilo_reloj, hilo_tubo;
 
     DatosReloj parametros_reloj = {duracion, momento_inicio, apertura, cierre, inicio, fin, &reloj, horas, ocupacion, registros, contadores, &terminado, ingresos};
@@ -410,14 +433,14 @@ int main(int argc, char *argv[]){
 
     pthread_create(&hilo_reloj, NULL, ejecutar_reloj, &parametros_reloj);
     pthread_create(&hilo_tubo, NULL, escuchar_tubo, &parametros_tubo);
-
+    // Esperar hilos
     pthread_join(hilo_reloj, NULL);
     pthread_join(hilo_tubo, NULL);
-
+    // Informe final
     generar_informe(horas, ocupacion, estadisticas, clientes_activos, descriptores, apertura, tubo, fd_lect);
 
     pthread_mutex_destroy(&bloqueo);
-
+    // Liberar memoria
     for (int i = 0; i < horas; i++) {
         free(registros[i]);
     }
