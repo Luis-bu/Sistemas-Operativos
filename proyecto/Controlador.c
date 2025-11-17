@@ -7,7 +7,6 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <math.h>
 
 #define LIMITE_CLIENTES 10   // Máx. clientes simultáneos
 #define TAM_BUFFER 256        // Tamaño de lectura
@@ -50,7 +49,6 @@ typedef struct {
     int* ingresos;                // Entradas por hora
 } DatosPipe;
 
-
 void parsear_argumentos(int argc, char* argv[], int* inicio, int* fin, int* seg, int* cap, char** tubo) {
     for(int i=1; i<argc; i++){
         if(*argv[i] == '-'){
@@ -64,7 +62,6 @@ void parsear_argumentos(int argc, char* argv[], int* inicio, int* fin, int* seg,
         }
     }
 }
-
 
 void preparar_sistema(char* tubo, time_t* momento_inicio, int* fd_lect) {
     if (mkfifo(tubo, 0666) == -1) { // Crear FIFO principal
@@ -100,7 +97,6 @@ int dividir_mensaje(char mensaje[], char* fragmentos[]){
 
     return cantidad;                       // Devuelve número de partes
 }
-
 
 void registrar_cliente(char** fragmentos, char* ids[], int descriptores[], int* contador, float momento){
     ids[*contador] = strdup(fragmentos[0]);                     // Guardar ID del cliente
@@ -144,9 +140,7 @@ int asignar_espacio(int ocupacion[], int horas, int solicitada,
     return 0;   // No hay cupo
 }
 
-
 void procesar_peticion(char** f, DatosPipe *d) {
-
     char* id_cliente = f[0];
     char* nombre = f[1];
     int hora = atoi(f[2]);
@@ -154,6 +148,10 @@ void procesar_peticion(char** f, DatosPipe *d) {
     char respuesta[100];
     char tiene_respuesta = 0;
     int hora_asignada;
+
+    // Imprimir la petición recibida
+    printf("[PETICION] Cliente %s solicita espacio para grupo %s (%d personas) - Hora deseada: %d:00\n", 
+           id_cliente, nombre, personas, hora);
 
     // Validaciones iniciales
     if(hora > d->cierre || personas > d->capacidad || *(d->reloj) >= d->cierre){
@@ -163,16 +161,19 @@ void procesar_peticion(char** f, DatosPipe *d) {
     }
 
     if(tiene_respuesta == 0){
-        hora_asignada = asignar_espacio(...);
-
-        // Caso hora pasada
+        // Intentar asignar espacio
+        hora_asignada = asignar_espacio(d->ocupacion, d->total_horas, hora, d->apertura, 
+                                        *(d->reloj), personas, d->capacidad, d->registros_familias, 
+                                        nombre, d->contador_familias, d->ingresos);
+        
+        // Caso hora pasada (extemporánea)
         if(hora < *(d->reloj)){
             tiene_respuesta = 1;
             if(hora_asignada > hora){
-                snprintf(respuesta, 100, "REPROGRAMADO: ... %d:00", hora_asignada);
+                snprintf(respuesta, 100, "REPROGRAMADO: Hora extemporanea - Nueva asignacion: %d:00", hora_asignada);
                 d->estadisticas[1]++;
             } else {
-                snprintf(respuesta, 100, "DENEGADO: ...");
+                snprintf(respuesta, 100, "DENEGADO: Hora extemporanea sin disponibilidad posterior");
                 d->estadisticas[2]++;
             }
         }
@@ -180,13 +181,13 @@ void procesar_peticion(char** f, DatosPipe *d) {
         // Horario válido
         if(tiene_respuesta == 0){
             if(hora_asignada == hora){
-                snprintf(respuesta, 100, "CONFIRMADO: ...");
+                snprintf(respuesta, 100, "CONFIRMADO: Espacios asignados para %d:00", hora_asignada);
                 d->estadisticas[0]++;
             } else if(hora_asignada > hora){
-                snprintf(respuesta, 100, "REPROGRAMADO: ...");
+                snprintf(respuesta, 100, "REPROGRAMADO: Sin cupo - Nueva asignacion: %d:00", hora_asignada);
                 d->estadisticas[1]++;
             } else {
-                snprintf(respuesta, 100, "DENEGADO: ...");
+                snprintf(respuesta, 100, "DENEGADO: Capacidad insuficiente en todas las franjas");
                 d->estadisticas[2]++;
             }
         }
@@ -200,7 +201,6 @@ void procesar_peticion(char** f, DatosPipe *d) {
         }
     }
 }
-
 
 void cerrar_cliente(char** f, char* ids[], int descriptores[], int* contador) {
     char* id = f[1];
@@ -221,22 +221,23 @@ void cerrar_cliente(char** f, char* ids[], int descriptores[], int* contador) {
     }
 }
 
-
 void* ejecutar_reloj(void* parametros){
     DatosReloj* datos = (DatosReloj*)parametros;
     float anterior = -1;
+    
     while(1){
         // Calcular hora simulada
         time_t actual;
         pthread_mutex_lock(&bloqueo);
         time(&actual);
         *(datos->reloj) = (difftime(actual, datos->inicio_real) / datos->duracion_hora) + datos->inicio_sim;
+
         // Imprimir cambios de hora
         if((int)(*(datos->reloj)) != (int)anterior){
             anterior = *(datos->reloj);
             printf("\n========== TIEMPO: %.0f:00 ==========\n", *(datos->reloj));
-             // Cálculo de entradas y salidas por hora...
-            // (Lógica de ocupación del parque)
+
+            // Cálculo de entradas y salidas por hora (lógica de ocupación del parque)
             if( (int)(*(datos->reloj)) >= datos->apertura && (int)(*(datos->reloj)) <= datos->cierre ){
                 int posicion = (int)(*(datos->reloj)) - datos->apertura;
 
@@ -250,12 +251,12 @@ void* ejecutar_reloj(void* parametros){
                     printf(">> Ingresos: %d personas acceden al parque\n", datos->ocupacion[posicion]);
                 }
 
+                // Mostrar grupos que entran/salen
                 if(posicion == 0){
                     printf("-- Grupos que ingresan:\n");
                     for(int j=0; j<datos->contador_familias[posicion]; j++){
                         printf("   * Grupo %s (ingreso confirmado)\n", datos->registros_familias[posicion][j]);
                     }
-                    
                 }else if(posicion != datos->total_horas){
                     printf("-- Grupos que ingresan:\n");
                     for(int i=0; i<datos->contador_familias[posicion]; i++){
@@ -280,7 +281,6 @@ void* ejecutar_reloj(void* parametros){
                             }
                         }
                     }
-
                 }else{
                     printf("-- Grupos que se retiran:\n");
                     for(int j=0; j<datos->contador_familias[posicion-1]; j++){
@@ -291,14 +291,15 @@ void* ejecutar_reloj(void* parametros){
                 printf("\n");
             }
         }
-         // Fin de simulación
+
+        // Fin de simulación
         if(*(datos->reloj) >= datos->fin_sim){
             *(datos->terminado) = 1;
             break;
         }
 
         pthread_mutex_unlock(&bloqueo);
-        usleep(100000); 
+        usleep(100000);
     }
     return NULL;
 }
@@ -316,15 +317,19 @@ void* escuchar_tubo(void* parametros){
             int cantidad = dividir_mensaje(buffer, fragmentos);
 
             pthread_mutex_lock(&bloqueo);
-            if(cantidad == 2){
-                registrar_cliente(fragmentos, datos->ids_clientes, datos->descriptores_escritura, datos->num_clientes, *(datos->reloj));
+            
+            if(cantidad == 2){                      // Registro de nuevo cliente
+                registrar_cliente(fragmentos, datos->ids_clientes, datos->descriptores_escritura, 
+                                 datos->num_clientes, *(datos->reloj));
             }
-            else if(cantidad == 4){
+            else if(cantidad == 4){                 // Solicitud de reserva
                 procesar_peticion(fragmentos, datos);
             }
-            else if(cantidad == 3){
-                cerrar_cliente(fragmentos, datos->ids_clientes, datos->descriptores_escritura, datos->num_clientes);
+            else if(cantidad == 3){                 // Cierre de cliente
+                cerrar_cliente(fragmentos, datos->ids_clientes, datos->descriptores_escritura, 
+                              datos->num_clientes);
             }
+            
             pthread_mutex_unlock(&bloqueo);
         }
         usleep(1000);
@@ -332,8 +337,10 @@ void* escuchar_tubo(void* parametros){
     return NULL;
 }
 
-void generar_informe(int horas, int ocupacion[], int estadisticas[], int clientes, int descriptores[], int apertura, char* tubo, int fd_lect) {
+void generar_informe(int horas, int ocupacion[], int estadisticas[], int clientes, 
+                     int descriptores[], int apertura, char* tubo, int fd_lect) {
     char* msg_fin = "FIN";
+    
     // Enviar "FIN" a todos los clientes
     for(int i=0; i<clientes; i++){
         write(descriptores[i], msg_fin, strlen(msg_fin));
@@ -343,9 +350,9 @@ void generar_informe(int horas, int ocupacion[], int estadisticas[], int cliente
     printf("\n╔════════════════════════════════════════╗\n");
     printf("║     INFORME FINAL DE OPERACIONES      ║\n");
     printf("╚════════════════════════════════════════╝\n\n");
+    
+    // Cálculo de franjas con mayor ocupación
     int maximo = 0;
-    // Cálculo de franjas con mayor y menor ocupación
-    // Resumen de estadísticas de solicitudes
     for(int i=0; i<horas; i++){
         if(ocupacion[i] > maximo){
             maximo = ocupacion[i];
@@ -358,6 +365,7 @@ void generar_informe(int horas, int ocupacion[], int estadisticas[], int cliente
         }
     }
 
+    // Cálculo de franjas con menor ocupación
     int minimo = maximo;
     for(int i=0; i<horas; i++){
         if(ocupacion[i] < minimo){
@@ -371,6 +379,7 @@ void generar_informe(int horas, int ocupacion[], int estadisticas[], int cliente
         }
     }
 
+    // Resumen de estadísticas de solicitudes
     printf("\n📋 RESUMEN DE SOLICITUDES PROCESADAS:\n");
     printf("   ✓ Aprobadas en horario solicitado: %d\n", estadisticas[0]);
     printf("   ↻ Reprogramadas a otro horario: %d\n", estadisticas[1]);
@@ -391,22 +400,26 @@ int main(int argc, char *argv[]){
     char* ids[LIMITE_CLIENTES];
     int descriptores[LIMITE_CLIENTES];
     int clientes_activos = 0;
-    int estadisticas[3]={0,0,0};
+    int estadisticas[3]={0,0,0};  // [confirmadas, reprogramadas, denegadas]
+
     // Leer parámetros
     parsear_argumentos(argc, argv, &inicio, &fin, &duracion, &capacidad, &tubo);
-     // Validar entrada
+
+    // Validar entrada
     if(inicio >= fin || duracion <= 0 || capacidad <= 0){
         printf("Error: Parámetros de ejecución inválidos.\n");
         return(1);
     }
 
     pthread_mutex_init(&bloqueo, NULL);
+    
     // Ajustar apertura/cierre reales del parque (7–19)
     int apertura = (inicio <= 7) ? 7 : inicio;
     int cierre = (fin <= 19) ? fin : 19;
     int horas = (fin == apertura) ? 1 : cierre - apertura;
+    
+    // Inicializar arrays de ocupación
     int ocupacion[horas];
-
     for(int i=0;i<horas;i++){
         ocupacion[i]=0;
     }
@@ -421,25 +434,34 @@ int main(int argc, char *argv[]){
         contadores[i]=0;
     }
 
+    // Reservar memoria para registros de familias
     char*** registros = malloc(horas * sizeof(char**));
     for(int i=0;i<horas;i++) registros[i] = malloc(capacidad * sizeof(char*));
-     // Inicializar estructuras internas
+
+    // Inicializar estructuras internas
     preparar_sistema(tubo, &momento_inicio, &fd_lect);
+
     // Crear hilos del reloj y pipe
     pthread_t hilo_reloj, hilo_tubo;
 
-    DatosReloj parametros_reloj = {duracion, momento_inicio, apertura, cierre, inicio, fin, &reloj, horas, ocupacion, registros, contadores, &terminado, ingresos};
-    DatosPipe parametros_tubo = {fd_lect, ids, descriptores, &clientes_activos, &reloj, apertura, cierre, inicio, fin, capacidad, ocupacion, horas, registros, contadores, &terminado, estadisticas, ingresos};
+    DatosReloj parametros_reloj = {duracion, momento_inicio, apertura, cierre, inicio, fin, 
+                                   &reloj, horas, ocupacion, registros, contadores, &terminado, ingresos};
+    DatosPipe parametros_tubo = {fd_lect, ids, descriptores, &clientes_activos, &reloj, apertura, cierre, 
+                                inicio, fin, capacidad, ocupacion, horas, registros, contadores, 
+                                &terminado, estadisticas, ingresos};
 
     pthread_create(&hilo_reloj, NULL, ejecutar_reloj, &parametros_reloj);
     pthread_create(&hilo_tubo, NULL, escuchar_tubo, &parametros_tubo);
+
     // Esperar hilos
     pthread_join(hilo_reloj, NULL);
     pthread_join(hilo_tubo, NULL);
+
     // Informe final
     generar_informe(horas, ocupacion, estadisticas, clientes_activos, descriptores, apertura, tubo, fd_lect);
 
     pthread_mutex_destroy(&bloqueo);
+
     // Liberar memoria
     for (int i = 0; i < horas; i++) {
         free(registros[i]);
